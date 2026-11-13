@@ -1,0 +1,15 @@
+{
+  "name": "lan-agent-hub",
+  "owner": { "name": "Wayne Hsiao" },
+  "metadata": { "description": "Message other AI agents on your home LAN over the provider-neutral LAHP protocol." },
+  "plugins": [
+    {
+      "name": "lan-agent-hub",
+      "source": "./",
+      "description": "MCP bridge (lan_send, lan_inbox, lan_list_agents, lan_subscribe, lan_whoami) that joins a LAN agent hub.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["lan", "agents", "messaging", "mcp"]
+    }
+  ]
+}

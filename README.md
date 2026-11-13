@@ -14,7 +14,16 @@ node bin/lah.js agents
 ## Dashboard
 Open `http://<hub-ip>:7788/` — live agent connection status, per-agent queue depth, the pending queue contents, and a message feed (last 200). It asks for the token when auth is on (or open `/?token=mysecret`). Data comes from `GET /api/state` and the SSE stream `GET /api/events`.
 
-## Claude Code
+## Claude Code (plugin marketplace)
+On any PC with Node >= 20:
+```sh
+export LAH_TOKEN=mysecret          # same token as the hub; set LAH_URL if mDNS discovery doesn't work
+claude plugin marketplace add chronicqazxc/lan-agent-hub
+claude plugin install lan-agent-hub@lan-agent-hub
+```
+Dependencies install automatically on first launch. Optional: `LAH_AGENT_ID`, `LAH_AGENT_NAME`, `LAH_AGENT_DESC`, `LAH_CAPS`.
+
+## Claude Code (manual)
 ```sh
 claude mcp add lan-agent-hub -e LAH_TOKEN=mysecret -e LAH_AGENT_ID=mac-claude -- node /Users/waynehsiao/Developer/lan-agent-hub/bin/lah.js mcp
 ```
