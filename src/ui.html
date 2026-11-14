@@ -84,6 +84,7 @@
 <main>
   <section><h2>Topology</h2><svg id="graph" viewBox="0 0 520 260" role="img" aria-label="Agents connected to the hub"></svg></section>
   <section><h2>Pending queue <span id="q-total"></span></h2><div id="queues"></div></section>
+  <section class="full" id="joinsec"><h2>Join requests <span id="join-count"></span></h2><div id="joins"></div></section>
   <section class="full"><h2>Invites <span id="mode"></span></h2>
     <form class="invform" id="invform"><input id="inv-id" placeholder="agent id (e.g. bob-laptop)" pattern="[A-Za-z0-9._-]{1,64}" required><input id="inv-name" placeholder="note (optional)"><button class="btn">New invite</button></form>
     <div id="newcode"></div><div id="invites"></div></section>
@@ -145,6 +146,19 @@ function render(st) {
   const fresh = st.messages.filter((m) => !seen.has(m.id));
   st.messages.forEach((m) => seen.add(m.id));
   drawGraph(st, first ? [] : fresh); first = false;
+
+  // join requests (anyone on the LAN can send one: check the agent id and address before approving)
+  $('joinsec').style.display = st.joinRequests ? '' : 'none';
+  $('join-count').textContent = st.joins.length ? st.joins.length + ' waiting' : '';
+  const jl = $('joins'); jl.replaceChildren();
+  if (!st.joins.length) jl.append(el('div', 'empty', 'No one is asking to join. Newcomers can run `lah join <agent-id>` or call lan_request_join.'));
+  for (const j of st.joins) {
+    const row = el('div', 'inv'), ok = el('button', 'btn', 'Approve'), no = el('button', 'btn bad', 'Deny');
+    ok.onclick = () => confirm(`Let "${j.agentId}" from ${j.ip} join the hub?`) && api('POST', '/api/joins/' + j.id + '/approve');
+    no.onclick = () => api('POST', '/api/joins/' + j.id + '/deny');
+    row.append(el('span', 'grow', j.agentId), el('span', 'time', `${j.ip} · ${ago(j.createdAt)}`), ok, no);
+    jl.append(row);
+  }
 
   // invites
   $('mode').textContent = st.auth ? (st.inviteOnly ? 'invite-only: the hub token cannot join' : 'hub token or an invite can join') : 'no auth: open to everyone';

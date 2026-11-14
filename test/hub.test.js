@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHub } from '../src/hub.js';
-import { HubClient } from '../src/client.js';
+import { HubClient, requestJoin } from '../src/client.js';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -154,4 +154,59 @@ test('one hub per PC: a second `lah hub` is refused, stale lock is ignored', asy
   writeFileSync(join(home, 'hub.lock'), JSON.stringify({ pid: 999999, port: 1 })); // stale
   const third = run(); await new Promise((r) => third.stdout.on('data', (d) => /listening/.test(d) && r()));
   third.kill('SIGTERM'); await new Promise((r) => third.on('exit', r));
+});
+
+test('join requests: ask, owner approves once, code handed over once; denial, caps, disabled', async () => {
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'adm', inviteOnly: true, advertise: false, joinTtlMs: 600 });
+  const url = `http://127.0.0.1:${await hub.start()}`;
+  const ask = (agentId) => fetch(url + '/join', { method: 'POST', body: JSON.stringify({ agentId, name: 'Bob <b>' }) });
+
+  // public, no credential; but nothing else is
+  const r = await ask('bob'); assert.equal(r.status, 202); const { secret } = await r.json();
+  assert.equal((await fetch(`${url}/join/${secret}`).then((x) => x.json())).status, 'pending');
+  assert.equal((await fetch(url + '/join/not-a-secret')).status, 404);
+  assert.equal((await fetch(url + '/api/joins')).status, 401);
+
+  // owner sees it (id + ip, never the secret) and approves
+  const list = await (await call(url, 'adm', 'GET', '/api/joins')).json();
+  assert.equal(list.length, 1); assert.equal(list[0].agentId, 'bob'); assert.ok(list[0].ip); assert.ok(!JSON.stringify(list).includes(secret));
+  assert.equal((await call(url, 'adm', 'POST', `/api/joins/${list[0].id}/approve`)).status, 200);
+  const got = await (await fetch(`${url}/join/${secret}`)).json();
+  assert.equal(got.status, 'approved'); assert.match(got.code, /^lah_/);
+  assert.equal((await fetch(`${url}/join/${secret}`)).status, 404); // code is handed over once
+  const bob = new HubClient({ url, token: got.code, id: 'ignored' }); await bob.connect(); assert.equal(bob.agent.id, 'bob');
+  const st = await (await call(url, 'adm', 'GET', '/api/state')).json();
+  assert.ok(!JSON.stringify(st).includes(got.code) && st.joins.length === 0);
+
+  // taken ids, denial, duplicate pending
+  assert.equal((await ask('bob')).status, 409);
+  const s2 = (await (await ask('eve')).json()).secret;
+  assert.equal((await ask('eve')).status, 409);
+  const eve = (await (await call(url, 'adm', 'GET', '/api/joins')).json())[0];
+  await call(url, 'adm', 'POST', `/api/joins/${eve.id}/deny`);
+  assert.equal((await fetch(`${url}/join/${s2}`).then((x) => x.json())).status, 'denied');
+  assert.equal((await call(url, 'adm', 'POST', `/api/joins/${eve.id}/approve`)).status, 404);
+
+  // per-IP cap (3 pending) and expiry
+  for (const n of ['a1', 'a2', 'a3']) assert.equal((await ask(n)).status, 202);
+  assert.equal((await ask('a4')).status, 429);
+  await wait(800);
+  assert.equal((await (await call(url, 'adm', 'GET', '/api/joins')).json()).length, 0); // expired
+  assert.equal((await ask('late')).status, 202);
+
+  // client helper
+  const p = requestJoin(url, { agentId: 'viaclient', pollMs: 50, timeoutMs: 3000 });
+  await wait(200);
+  const pending = (await (await call(url, 'adm', 'GET', '/api/joins')).json()).find((j) => j.agentId === 'viaclient');
+  await call(url, 'adm', 'POST', `/api/joins/${pending.id}/approve`);
+  const res = await p; assert.equal(res.status, 'approved'); assert.equal(res.agentId, 'viaclient');
+
+  bob.close(); await hub.stop();
+
+  // disabled without a token or when switched off
+  for (const o of [{ token: null }, { token: 'x', joinRequests: false }]) {
+    const h = createHub({ port: 0, host: '127.0.0.1', advertise: false, ...o });
+    const u = `http://127.0.0.1:${await h.start()}`;
+    assert.equal((await fetch(u + '/join', { method: 'POST', body: '{"agentId":"q"}' })).status, 404); await h.stop();
+  }
 });

@@ -44,6 +44,12 @@ Credentials are passed as `Authorization: Bearer X` or `?token=X`.
 | `DELETE /api/invites/:agentId` | revoke: closes the socket (code 4001), forgets the agent and its queued mail |
 | `POST /api/agents/:id/kick` | close the socket (code 4002); clients do not auto-reconnect after 4001/4002 or a 401 |
 
+### Join requests
+A device with no credential can ask the owner for admission (needs a hub token; off with `--no-join-requests`; advertised as TXT `join=1`). These two endpoints are public on purpose, guarded by caps and an unguessable poll secret:
+- `POST /join {agentId, name?}` → `202 {secret, status:"pending", expiresInSec}`. `409` if the id is taken or already pending; `429` past 3 pending per IP, 20 pending total, or 10 requests/min/IP. Pending requests expire after 10 minutes.
+- `GET /join/:secret` → `{status:"pending"}`, then once: `{status:"approved", agentId, code}` or `{status:"denied"}`; afterwards `404`. The code is delivered exactly once.
+- Owner (hub token): `GET /api/joins` (id, agentId, name, ip, createdAt), `POST /api/joins/:id/approve|deny`. Approve mints an invite as above.
+
 Invites persist in `~/.lan-agent-hub/invites.json` (`LAH_HOME` overrides; mode 0600). One hub per PC: `lah hub` writes `hub.lock` (pid, port) there and refuses to start if a live one exists.
 
 ## Not yet (v1 limits)

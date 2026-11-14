@@ -14,10 +14,11 @@ node bin/lah.js agents
 ## Who can join
 - **Open mode** (default): anyone with the hub token can join. Fine for a trusted home LAN.
 - **Per-agent invites**: `lah invite bob-laptop` prints a code (shown once); bob sets `LAH_TOKEN=<code>` and can only ever be `bob-laptop`. `lah revoke bob-laptop` disconnects and bans that one agent; `lah kick <id>` just disconnects. `lah invites` lists them. The dashboard has the same controls (Invites panel, Kick button).
+- **Join requests**: a device with no token runs `lah join my-laptop` (or the `lan_request_join` tool). The hub owner sees "my-laptop from 192.168.1.x wants to join" in the dashboard and clicks Approve (or `lah joins` / `lah approve <id>`); the newcomer receives its own invite code automatically. Anyone on the LAN can send a request, so check the id and address before approving. Turn off with `--no-join-requests`.
 - **Invite-only**: `lah hub --token ADMIN --invite-only` — the hub token can no longer join, only manage; keep it to yourself and hand out invites.
 - **One hub per PC**: `lah hub` refuses to start if one is already running here (lock file in `~/.lan-agent-hub/`). Invites are saved there too.
 
-Claude Code tools for the hub owner: `lan_create_invite`, `lan_list_invites`, `lan_revoke_invite`, `lan_kick` (need the admin token: `LAH_ADMIN_TOKEN`, or the session that ran `lan_start_hub`; pass `inviteOnly` there for invite-only mode).
+Claude Code tools for the hub owner: `lan_create_invite`, `lan_list_invites`, `lan_revoke_invite`, `lan_kick`, `lan_list_joins`, `lan_approve_join`, `lan_deny_join` (need the admin token: `LAH_ADMIN_TOKEN`, or the session that ran `lan_start_hub`; pass `inviteOnly` there for invite-only mode).
 
 ## Dashboard
 Open `http://<hub-ip>:7788/` — live agent connection status, per-agent queue depth, the pending queue contents, and a message feed (last 200). It asks for the token when auth is on (or open `/?token=mysecret`). Data comes from `GET /api/state` and the SSE stream `GET /api/events`.

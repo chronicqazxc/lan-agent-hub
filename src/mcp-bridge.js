@@ -6,7 +6,7 @@ import { hostname } from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { HubClient, discoverHubs } from './client.js';
+import { HubClient, discoverHubs, requestJoin } from './client.js';
 import { DEFAULT_PORT } from './protocol.js';
 import { runningHub } from './lock.js';
 
@@ -20,6 +20,7 @@ export async function runMcpBridge(env = process.env) {
   // it joins one via startup auto-discovery, lan_connect_hub, or lan_start_hub.
   let client = null;
   let hubName = null;
+  let joinState = { status: 'none' }; // progress of a lan_request_join
   let adminToken = env.LAH_ADMIN_TOKEN ?? null; // set when this session starts the hub, or via env
 
   const connectTo = async (url, { token = env.LAH_TOKEN, name = null } = {}) => {
@@ -57,9 +58,34 @@ export async function runMcpBridge(env = process.env) {
   reg('lan_connect_hub', 'Join a hub found by lan_discover_hubs (pass its url) or at a known url. Uses LAH_TOKEN unless a token is given.',
     z.object({ url: z.string(), name: z.string().optional(), token: z.string().optional() }),
     async ({ url, name, token }) => {
-      await connectTo(url, { token: token ?? env.LAH_TOKEN, name: name ?? null });
+      await connectTo(url, { token: token ?? env.LAH_TOKEN, name: name ?? null }).catch((e) => {
+        throw new Error(/401|bad token/.test(e.message) ? `${e.message} — no valid token/invite for this hub; use lan_request_join to ask the owner` : e.message);
+      });
       return text(`connected to ${url} as ${need().agent.id}`);
     });
+  reg('lan_request_join', 'Ask the hub owner for admission when you have no token/invite. Sends a request the owner approves in their dashboard (or `lah approve`); once approved this session joins automatically. Returns immediately; check lan_join_status.',
+    z.object({ url: z.string().optional(), agentId: z.string().optional() }),
+    async ({ url, agentId }) => {
+      if (joinState.status === 'waiting') return text('a join request is already waiting for the owner');
+      const hubs = url ? [] : await discoverHubs(2000);
+      const target = url ?? (hubs.length === 1 ? hubs[0].url : null);
+      if (!target) return text(hubs.length ? { error: 'several hubs found; pass url', hubs } : 'no hub found; pass url');
+      const wanted = agentId ?? id;
+      const name = hubs.find((h) => h.url === target)?.name ?? null;
+      joinState = { status: 'waiting', hub: target, agentId: wanted };
+      requestJoin(target, { agentId: wanted, name: env.LAH_AGENT_NAME }).then(async (r) => {
+        if (r.status !== 'approved') { joinState = { status: r.status, hub: target, detail: r.reason }; return; }
+        try { await connectTo(target, { token: r.code, name }); joinState = { status: 'joined', hub: target, agentId: r.agentId }; }
+        catch (e) { joinState = { status: 'error', hub: target, detail: e.message }; }
+      }, (e) => { joinState = { status: 'error', hub: target, detail: e.message }; });
+      return text(`join request sent to ${target} as "${wanted}". Ask the hub owner to approve it (dashboard Join requests, or \`lah approve\`), then call lan_join_status.`);
+    });
+  reg('lan_join_status', 'Progress of your join request: waiting | joined | denied | timeout | error.', z.object({}), async () => text(joinState));
+  reg('lan_list_joins', 'Hub owner only: pending join requests (id, agentId, ip).', z.object({}), async () => text(await admin('GET', '/api/joins')));
+  reg('lan_approve_join', 'Hub owner only: approve a pending join request by its id. Confirm the agent id and IP with the user first.', z.object({ requestId: z.string() }),
+    async ({ requestId }) => text(await admin('POST', `/api/joins/${encodeURIComponent(requestId)}/approve`)));
+  reg('lan_deny_join', 'Hub owner only: deny a pending join request.', z.object({ requestId: z.string() }),
+    async ({ requestId }) => text(await admin('POST', `/api/joins/${encodeURIComponent(requestId)}/deny`)));
   reg('lan_start_hub', 'Start a hub on THIS machine (opens a network listener; only call when the user asks). Refuses if a hub is already visible on the LAN unless force=true. Returns the token — share it with other agents.',
     z.object({ token: z.string().optional(), force: z.boolean().optional(), inviteOnly: z.boolean().optional() }),
     async ({ token, force, inviteOnly }) => {
@@ -111,7 +137,8 @@ export async function runMcpBridge(env = process.env) {
     if (env.LAH_URL) await connectTo(env.LAH_URL);
     else {
       const hubs = await discoverHubs();
-      if (hubs.length === 1) await connectTo(hubs[0].url, { name: hubs[0].name });
+      if (hubs.length === 1 && hubs[0].auth && !env.LAH_TOKEN) console.error(`lan-agent-hub: found ${hubs[0].name} but no LAH_TOKEN; set it, or call lan_request_join`);
+      else if (hubs.length === 1) await connectTo(hubs[0].url, { name: hubs[0].name });
       else console.error(hubs.length ? `lan-agent-hub: ${hubs.length} hubs found, pick one with lan_connect_hub` : 'lan-agent-hub: no hub found; use lan_start_hub or set LAH_URL');
     }
   } catch (e) { console.error('lan-agent-hub: startup connect failed:', e.message); }

@@ -24,6 +24,28 @@ export async function discoverHub(timeoutMs = 3000) {
 }
 
 /**
+ * Ask a hub's owner for admission. Resolves to { status:'approved', agentId, code } | { status:'denied' } | { status:'timeout' }.
+ * `onPending` is called once the request is registered. Rejects if the hub refuses the request.
+ */
+export async function requestJoin(url, { agentId, name, timeoutMs = 10 * 60_000, pollMs = 2000, onPending } = {}) {
+  const base = url.replace(/\/$/, '');
+  const r = await fetch(`${base}/join`, { method: 'POST', body: JSON.stringify({ agentId, name }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`${r.status}: ${j.error ?? 'join request refused'}`);
+  onPending?.(j);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, pollMs));
+    const p = await fetch(`${base}/join/${j.secret}`).catch(() => null);
+    if (!p) continue; // hub briefly unreachable
+    if (p.status === 404) return { status: 'denied', reason: 'request expired or was removed' };
+    const b = await p.json();
+    if (b.status !== 'pending') return b;
+  }
+  return { status: 'timeout' };
+}
+
+/**
  * Hub client. Emits: 'message' (envelope), 'presence', 'open', 'close'.
  * Keeps a local `inbox` buffer so pull-style hosts (e.g. MCP tools) can drain it.
  */
