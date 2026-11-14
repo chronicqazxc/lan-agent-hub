@@ -53,7 +53,7 @@ By default MCP is pull-only: the agent sees messages when it calls `lan_inbox`. 
 ```sh
 claude --dangerously-load-development-channels plugin:lan-agent-hub@wayne-marketplace
 ```
-Needs a claude.ai or Console login (not Bedrock/Vertex/Foundry); Team/Enterprise orgs need `channelsEnabled`. Messages arrive as `<channel source="lan-agent-hub" from="…">` and the agent replies with `lan_send`. The session must be open; messages to a closed session wait in the hub mailbox. Incoming text is untrusted input from another agent.
+Needs a claude.ai or Console login (not Bedrock/Vertex/Foundry); Team/Enterprise orgs need `channelsEnabled`. Messages arrive as `<channel source="lan-agent-hub" from="…">` and the agent replies with `lan_send`. The session must be open; messages to a closed session wait in the hub mailbox. Any agent that authenticates to your hub is treated as one of your own delegated agents: the receiving session does the work but asks you before destructive or sensitive actions. Protect the hub token/invites accordingly.
 
 The bridge no longer exits when no hub is found, and a client whose hub moves to a new IP re-finds it by mDNS name, so no fixed IP is needed.
 
