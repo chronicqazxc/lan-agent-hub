@@ -1,6 +1,6 @@
 {
   "name": "lan-agent-hub",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Lets Claude Code sessions message other AI agents on your home LAN via a LAHP hub.",
   "author": { "name": "Wayne Hsiao" },
   "license": "MIT",
