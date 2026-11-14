@@ -47,7 +47,7 @@ switch (cmd) {
     else console.log(await go('POST', `/api/joins/${encodeURIComponent(pos[0])}/${cmd}`));
     break;
   }
-  case 'invite': case 'invites': case 'revoke': case 'kick': case 'forget': {
+  case 'invite': case 'invites': case 'reissue': case 'revoke': case 'kick': case 'forget': {
     if (!token) { console.error('admin commands need the hub token (--token or LAH_TOKEN)'); process.exit(1); }
     const base = await hubUrl(); const h = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     const call = async (method, path, body) => { const r = await fetch(base + path, { method, headers: h, body: body && JSON.stringify(body) }); const j = await r.json().catch(() => ({})); if (!r.ok) { console.error(`${r.status}: ${j.error ?? 'failed'}`); process.exit(1); } return j; };
@@ -56,6 +56,9 @@ switch (cmd) {
     else if (cmd === 'invite') {
       const r = await call('POST', '/api/invites', { agentId: pos[0], name: flags.name });
       console.log(`Invite for "${r.agentId}" (shown once):\n  LAH_TOKEN=${r.code}\n  LAH_URL=${base}   (optional if mDNS works)`);
+    } else if (cmd === 'reissue') {
+      const r = await call('POST', `/api/invites/${encodeURIComponent(pos[0])}/reissue`);
+      console.log(`New invite for "${r.agentId}" (shown once; the old code no longer works; ${r.queued} queued message(s) kept):\n  LAH_TOKEN=${r.code}\n  LAH_URL=${base}`);
     } else if (cmd === 'revoke') { await call('DELETE', `/api/invites/${encodeURIComponent(pos[0])}`); console.log(`revoked ${pos[0]}`); }
     else if (cmd === 'forget') { await call('DELETE', `/api/agents/${encodeURIComponent(pos[0])}`); console.log(`forgot ${pos[0]}`); }
     else console.log(await call('POST', `/api/agents/${encodeURIComponent(pos[0])}/kick`));

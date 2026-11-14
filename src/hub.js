@@ -257,6 +257,16 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
         changed(); log(`invite revoked for ${id}`);
         return json(res, 200, { ok: true });
       }
+      m2 = url.pathname.match(/^\/api\/invites\/([^/]+)\/reissue$/);
+      if (req.method === 'POST' && m2) { // lost its code: replace it with a new one, keeping the agent record and queued mail
+        const id = decodeURIComponent(m2[1]); const old = invites.get(id); const rec = agents.get(id);
+        if (!old && !rec) return json(res, 404, { error: 'unknown agent' });
+        if (old) { invites.delete(id); inviteByHash.delete(old.hash); }
+        const { inv, code } = mintInvite(id, old?.name ?? rec?.info?.name);
+        rec?.ws?.close(4001, 'invite reissued'); // a holder of the old code is cut off; the new code is the only way back
+        log(`invite reissued for ${id}`);
+        return json(res, 201, { ...publicInvite(inv), code, queued: (mailboxes.get(id) ?? []).length });
+      }
       m2 = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
       if (req.method === 'DELETE' && m2) { // forget an OFFLINE agent: drop its record and queued mail, and revoke its invite if it has one
         const id = decodeURIComponent(m2[1]); const rec = agents.get(id); const inv = invites.get(id);

@@ -166,9 +166,11 @@ function render(st) {
   const iv = $('invites'); iv.replaceChildren();
   if (!st.invites.length) iv.append(el('div', 'empty', 'No invites yet. An invite lets one named agent join and can be revoked on its own.'));
   for (const i of st.invites) {
-    const row = el('div', 'inv'), b = el('button', 'btn bad', 'Revoke');
+    const row = el('div', 'inv'), b = el('button', 'btn bad', 'Revoke'), rb = el('button', 'btn', 'Reissue');
+    rb.title = 'Agent lost its code? Make a new one. Keeps its record and queued messages; the old code stops working.';
+    rb.onclick = async () => { if (!confirm(`Reissue ${i.agentId}? The old code stops working and the agent is disconnected.`)) return; const r = await api('POST', '/api/invites/' + encodeURIComponent(i.agentId) + '/reissue'); if (r?.code) { const box = $('newcode'); box.replaceChildren(); box.append(el('div', 'meta', `New invite for "${r.agentId}" — shown once; the old code no longer works. Give it to that agent as LAH_TOKEN:`), el('div', 'code', r.code)); } };
     b.onclick = () => confirm(`Revoke ${i.agentId}? It is disconnected and cannot rejoin.`) && api('DELETE', '/api/invites/' + encodeURIComponent(i.agentId));
-    row.append(el('span', 'grow', i.agentId), el('span', 'time', (i.name !== i.agentId ? i.name + ' · ' : '') + (i.lastUsedAt ? 'last joined ' + ago(i.lastUsedAt) : 'never joined')), b);
+    row.append(el('span', 'grow', i.agentId), el('span', 'time', (i.name !== i.agentId ? i.name + ' · ' : '') + (i.lastUsedAt ? 'last joined ' + ago(i.lastUsedAt) : 'never joined')), rb, b);
     iv.append(row);
   }
 

@@ -299,3 +299,25 @@ test('mcp bridge pushes incoming messages to the session inbox socket as a user 
   assert.match(got[1].message.content, /^\[LAN message from alice /); assert.match(got[1].message.content, /hello socket/);
   bridge.kill(); a.close(); sock.close(); await hub.stop();
 });
+
+test('reissue: replaces a lost invite code, keeps the agent record and queued mail', async () => {
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'adm', advertise: false });
+  const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
+  const adm = { authorization: 'Bearer adm', 'content-type': 'application/json' };
+  const mkInv = await (await fetch(`${url}/api/invites`, { method: 'POST', headers: adm, body: JSON.stringify({ agentId: 'win' }) })).json();
+  const w = new HubClient({ url, token: mkInv.code, id: 'win' }); await w.connect(); w.close(); await wait(50);
+  const s = new HubClient({ url, token: 'adm', id: 'sender' }); await s.connect();
+  assert.deepEqual((await s.send('win', 'while you were away')).queued, ['win']);
+
+  assert.equal((await fetch(`${url}/api/invites/nobody/reissue`, { method: 'POST', headers: adm })).status, 404);
+  assert.equal((await fetch(`${url}/api/invites/win/reissue`, { method: 'POST' })).status, 401);
+  const r = await fetch(`${url}/api/invites/win/reissue`, { method: 'POST', headers: adm });
+  assert.equal(r.status, 201); const j = await r.json();
+  assert.equal(j.queued, 1); assert.notEqual(j.code, mkInv.code);
+
+  await assert.rejects(new HubClient({ url, token: mkInv.code, id: 'win' }).connect(), /401/); // old code is dead
+  const w2 = new HubClient({ url, token: j.code, id: 'win' }); await w2.connect(); await wait(50);
+  assert.equal(w2.drain()[0].content.body, 'while you were away'); // mail survived
+
+  w2.close(); s.close(); await hub.stop();
+});

@@ -28,8 +28,15 @@ export function writeHubLock(port, env = process.env) {
 const credPath = (env) => join(homeDir(env), 'credentials.json');
 const readCreds = (env) => { try { return JSON.parse(readFileSync(credPath(env), 'utf8')); } catch { return {}; } };
 
-/** Invite code saved for a hub (key = hub name, or its URL), or null. */
-export const savedCredential = (key, env = process.env) => (key && readCreds(env)[key]) || null;
+/** Invite code saved for a hub (key = hub name, or its URL), or null. Pass several keys to try each in turn. */
+export const savedCredential = (keys, env = process.env) => {
+  const all = readCreds(env);
+  for (const k of [].concat(keys)) if (k && all[k]) return all[k];
+  return null;
+};
+
+/** Every saved credential that remembers its hub URL (for reconnecting when mDNS finds nothing). */
+export const savedHubUrls = (env = process.env) => Object.values(readCreds(env)).filter((c) => c?.url && c?.code);
 
 export function saveCredential(key, cred, env = process.env) {
   mkdirSync(homeDir(env), { recursive: true });
@@ -37,9 +44,9 @@ export function saveCredential(key, cred, env = process.env) {
   try { chmodSync(credPath(env), 0o600); } catch {}
 }
 
-export function forgetCredential(key, env = process.env) {
-  const c = readCreds(env); if (!(key in c)) return;
-  delete c[key]; writeFileSync(credPath(env), JSON.stringify(c, null, 2), { mode: 0o600 });
+export function forgetCredential(keys, env = process.env) {
+  const c = readCreds(env); const ks = [].concat(keys).filter((k) => k && k in c); if (!ks.length) return;
+  for (const k of ks) delete c[k]; writeFileSync(credPath(env), JSON.stringify(c, null, 2), { mode: 0o600 });
 }
 
 /**

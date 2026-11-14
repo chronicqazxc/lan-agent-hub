@@ -9,7 +9,7 @@ import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { HubClient, discoverHubs, requestJoin } from './client.js';
 import { DEFAULT_PORT } from './protocol.js';
-import { runningHub, savedCredential, saveCredential, forgetCredential, claimAgentId } from './lock.js';
+import { runningHub, savedCredential, savedHubUrls, saveCredential, forgetCredential, claimAgentId } from './lock.js';
 
 const LAH_BIN = fileURLToPath(new URL('../bin/lah.js', import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -73,11 +73,10 @@ export async function runMcpBridge(env = process.env) {
     if (mode.channel) pushChannel(body, { from: 'lan-agent-hub', kind: 'notice' });
   };
 
-  const credKey = (url, name) => name ?? url;
   const connectTo = async (url, { token, name = null } = {}) => {
     // explicit token > LAH_TOKEN > invite code remembered from an earlier approved join (primary session only)
-    const key = credKey(url, name);
-    const saved = !token && !env.LAH_TOKEN && primary ? savedCredential(key, env) : null;
+    const keys = [name, url]; // saved under both, so a join by URL is found via mDNS name later and vice versa
+    const saved = !token && !env.LAH_TOKEN && primary ? savedCredential(keys, env) : null;
     token ||= env.LAH_TOKEN || saved?.code;
     const next = new HubClient({
       url, token, id, name: env.LAH_AGENT_NAME ?? id, kind: 'claude-code',
@@ -89,7 +88,7 @@ export async function runMcpBridge(env = process.env) {
     next.on('message', push); // channel push; the hub already set `from` to the authenticated sender
     try { await next.connect(); }
     catch (e) {
-      if (saved && /\b401\b/.test(e.message)) { forgetCredential(key, env); throw new Error(`saved invite for ${key} is no longer valid (revoked?); call lan_request_join`); }
+      if (saved && /\b401\b/.test(e.message)) { forgetCredential(keys, env); throw new Error(`saved invite for ${name ?? url} is no longer valid (revoked or reissued?); call lan_request_join, or ask the owner for a new invite and use lan_connect_hub`); }
       throw e;
     }
     client?.close();
@@ -144,7 +143,7 @@ export async function runMcpBridge(env = process.env) {
         }
         try {
           await connectTo(target, { token: r.code, name });
-          if (primary && r.agentId === baseId) saveCredential(credKey(target, name), { agentId: r.agentId, code: r.code }, env);
+          if (primary && r.agentId === baseId) for (const k of new Set([name, target])) if (k) saveCredential(k, { agentId: r.agentId, code: r.code, url: target }, env);
           joinState = { status: 'joined', hub: target, agentId: r.agentId };
           pushNotice(`Your join request to ${target} was approved. You are now connected as "${r.agentId}"; no need to call lan_join_status. Use lan_list_agents / lan_send.`);
         } catch (e) {
@@ -186,6 +185,8 @@ export async function runMcpBridge(env = process.env) {
   reg('lan_create_invite', 'Hub owner only: create a per-agent invite code (shown once). The agent joins by setting LAH_TOKEN to the code; it can only ever act as that agent id.',
     z.object({ agentId: z.string(), name: z.string().optional() }),
     async ({ agentId, name }) => text(await admin('POST', '/api/invites', { agentId, name })));
+  reg('lan_reissue_invite', 'Hub owner only: an agent lost its invite code. Replace it with a new one (shown once), keeping the agent record and queued messages. The old code stops working.', z.object({ agentId: z.string() }),
+    async ({ agentId }) => text(await admin('POST', `/api/invites/${encodeURIComponent(agentId)}/reissue`)));
   reg('lan_list_invites', 'Hub owner only: list invites (not the codes).', z.object({}), async () => text(await admin('GET', '/api/invites')));
   reg('lan_revoke_invite', 'Hub owner only: revoke an agent\'s invite; it is disconnected immediately and cannot rejoin.', z.object({ agentId: z.string() }),
     async ({ agentId }) => text(await admin('DELETE', `/api/invites/${encodeURIComponent(agentId)}`)));
@@ -213,9 +214,16 @@ export async function runMcpBridge(env = process.env) {
     if (env.LAH_URL) await connectTo(env.LAH_URL);
     else {
       const hubs = await discoverHubs();
-      if (hubs.length === 1 && hubs[0].auth && !env.LAH_TOKEN && !(primary && savedCredential(hubs[0].name, env))) console.error(`lan-agent-hub: found ${hubs[0].name} but no LAH_TOKEN; set it, or call lan_request_join`);
+      if (hubs.length === 1 && hubs[0].auth && !env.LAH_TOKEN && !(primary && savedCredential([hubs[0].name, hubs[0].url], env))) console.error(`lan-agent-hub: found ${hubs[0].name} but no LAH_TOKEN; set it, or call lan_request_join`);
       else if (hubs.length === 1) await connectTo(hubs[0].url, { name: hubs[0].name });
-      else console.error(hubs.length ? `lan-agent-hub: ${hubs.length} hubs found, pick one with lan_connect_hub` : 'lan-agent-hub: no hub found; use lan_start_hub or set LAH_URL');
+      else if (hubs.length) console.error(`lan-agent-hub: ${hubs.length} hubs found, pick one with lan_connect_hub`);
+      else {
+        // mDNS found nothing (blocked multicast, VPN, Windows firewall): try the hub URL remembered with a saved invite
+        const known = primary ? savedHubUrls(env) : [];
+        let ok = false;
+        for (const c of known) { try { await connectTo(c.url); ok = true; console.error(`lan-agent-hub: mDNS found no hub; reconnected to ${c.url} with the saved invite`); break; } catch (e) { console.error(`lan-agent-hub: saved hub ${c.url} unreachable: ${e.message}`); } }
+        if (!ok) console.error('lan-agent-hub: no hub found; use lan_start_hub or set LAH_URL');
+      }
     }
   } catch (e) { console.error('lan-agent-hub: startup connect failed:', e.message); }
 }
