@@ -232,3 +232,50 @@ test('mcp bridge pushes incoming messages as claude/channel notifications', asyn
   assert.equal(n.params.meta.from, 'alice');
   bridge.kill(); a.close(); await hub.stop();
 });
+
+test('forget: removes an offline agent (and its invite), refuses online ones', async () => {
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'adm', advertise: false });
+  const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
+  const H = { authorization: 'Bearer adm' };
+  const a = new HubClient({ url, token: 'adm', id: 'alice' }); await a.connect();
+  const b = new HubClient({ url, token: 'adm', id: 'bob' }); await b.connect();
+  b.close(); await wait(100);
+  await a.send('bob', 'queued');
+  assert.equal((await fetch(`${url}/api/agents/alice`, { method: 'DELETE', headers: H })).status, 409); // online
+  assert.equal((await fetch(`${url}/api/agents/bob`, { method: 'DELETE', headers: H })).status, 200);
+  assert.equal((await fetch(`${url}/api/agents/bob`, { method: 'DELETE', headers: H })).status, 404);
+  assert.equal((await fetch(`${url}/api/agents/bob`, { method: 'DELETE' })).status, 401);
+  assert.ok(!(await a.list()).some((x) => x.id === 'bob'));
+  a.close(); await hub.stop();
+});
+
+test('mcp bridge remembers its approved invite and rejoins after a restart with the same id', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'lah-home-'));
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'adm', advertise: false });
+  const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
+  const H = { authorization: 'Bearer adm' };
+  const run = () => {
+    const p = spawn(process.execPath, [join(import.meta.dirname, '../bin/lah.js'), 'mcp'],
+      { env: { ...process.env, LAH_HOME: home, LAH_URL: url, LAH_TOKEN: '', LAH_AGENT_ID: 'mac-claude' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    const lines = []; let buf = '';
+    p.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } });
+    const rpc = async (id, method, params) => { p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); for (let i = 0; i < 60 && !lines.find((l) => l.id === id); i++) await wait(100); return lines.find((l) => l.id === id)?.result; };
+    return { p, rpc };
+  };
+  const hello = (b) => b.rpc(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+  const whoami = async (b) => JSON.parse((await b.rpc(9, 'tools/call', { name: 'lan_whoami', arguments: {} }))?.content?.[0]?.text ?? '{}');
+
+  let b = run(); await hello(b);
+  await b.rpc(2, 'tools/call', { name: 'lan_request_join', arguments: { url } });
+  let req; for (let i = 0; i < 30 && !req; i++) { await wait(100); req = (await (await fetch(`${url}/api/joins`, { headers: H })).json())[0]; }
+  assert.equal(req.agentId, 'mac-claude');
+  await fetch(`${url}/api/joins/${req.id}/approve`, { method: 'POST', headers: H });
+  for (let i = 0; i < 60 && !existsSync(join(home, 'credentials.json')); i++) await wait(100);
+  assert.ok(existsSync(join(home, 'credentials.json')), 'credential saved after approval');
+  b.p.kill(); await wait(300);
+
+  b = run(); await hello(b); await wait(500); // no join request this time
+  assert.equal((await whoami(b)).id, 'mac-claude');
+  assert.equal((await (await fetch(`${url}/api/joins`, { headers: H })).json()).length, 0);
+  b.p.kill(); await hub.stop();
+});

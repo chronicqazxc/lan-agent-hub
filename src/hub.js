@@ -257,6 +257,15 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
         changed(); log(`invite revoked for ${id}`);
         return json(res, 200, { ok: true });
       }
+      m2 = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+      if (req.method === 'DELETE' && m2) { // forget an OFFLINE agent: drop its record and queued mail, and revoke its invite if it has one
+        const id = decodeURIComponent(m2[1]); const rec = agents.get(id); const inv = invites.get(id);
+        if (!rec && !inv) return json(res, 404, { error: 'unknown agent' });
+        if (rec?.ws) return json(res, 409, { error: 'agent is online; kick it first' });
+        if (inv) { invites.delete(id); inviteByHash.delete(inv.hash); saveInvites(); }
+        agents.delete(id); mailboxes.delete(id); changed(); log(`forgot ${id}${inv ? ' (invite revoked)' : ''}`);
+        return json(res, 200, { ok: true, revokedInvite: !!inv });
+      }
       m2 = url.pathname.match(/^\/api\/agents\/([^/]+)\/kick$/);
       if (req.method === 'POST' && m2) { // disconnect only; with a shared token the agent may reconnect, an invite holder too until revoked
         const rec = agents.get(decodeURIComponent(m2[1]));

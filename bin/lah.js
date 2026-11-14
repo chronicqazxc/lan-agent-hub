@@ -47,7 +47,7 @@ switch (cmd) {
     else console.log(await go('POST', `/api/joins/${encodeURIComponent(pos[0])}/${cmd}`));
     break;
   }
-  case 'invite': case 'invites': case 'revoke': case 'kick': {
+  case 'invite': case 'invites': case 'revoke': case 'kick': case 'forget': {
     if (!token) { console.error('admin commands need the hub token (--token or LAH_TOKEN)'); process.exit(1); }
     const base = await hubUrl(); const h = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     const call = async (method, path, body) => { const r = await fetch(base + path, { method, headers: h, body: body && JSON.stringify(body) }); const j = await r.json().catch(() => ({})); if (!r.ok) { console.error(`${r.status}: ${j.error ?? 'failed'}`); process.exit(1); } return j; };
@@ -57,6 +57,7 @@ switch (cmd) {
       const r = await call('POST', '/api/invites', { agentId: pos[0], name: flags.name });
       console.log(`Invite for "${r.agentId}" (shown once):\n  LAH_TOKEN=${r.code}\n  LAH_URL=${base}   (optional if mDNS works)`);
     } else if (cmd === 'revoke') { await call('DELETE', `/api/invites/${encodeURIComponent(pos[0])}`); console.log(`revoked ${pos[0]}`); }
+    else if (cmd === 'forget') { await call('DELETE', `/api/agents/${encodeURIComponent(pos[0])}`); console.log(`forgot ${pos[0]}`); }
     else console.log(await call('POST', `/api/agents/${encodeURIComponent(pos[0])}/kick`));
     break;
   }
@@ -78,6 +79,7 @@ switch (cmd) {
   hub    [--port 7788] [--token T] [--invite-only] [--no-join-requests]   run the hub (one per PC)
   invite <agent-id> [--name N]         create a per-agent invite code (admin token)
   invites | revoke <id> | kick <id>    list / remove / disconnect (admin token)
+  forget <id>                          remove an offline agent and its queue (admin token)
   join <agent-id>                      ask the hub owner to admit this device (no token needed)
   joins | approve <req> | deny <req>   review join requests (admin token)
   agents                               list agents

@@ -42,6 +42,7 @@ Credentials are passed as `Authorization: Bearer X` or `?token=X`.
 | `POST /api/invites {agentId, name?}` | create; `201 {agentId, name, code}`; `409` if one exists |
 | `GET /api/invites` | list (no codes) |
 | `DELETE /api/invites/:agentId` | revoke: closes the socket (code 4001), forgets the agent and its queued mail |
+| `DELETE /api/agents/:id` | forget an offline agent: drops its record and queued mail and revokes its invite if any; `409` while online (kick first) |
 | `POST /api/agents/:id/kick` | close the socket (code 4002); clients do not auto-reconnect after 4001/4002 or a 401 |
 
 ### Join requests

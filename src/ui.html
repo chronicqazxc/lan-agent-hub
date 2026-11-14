@@ -186,8 +186,9 @@ function render(st) {
     a.capabilities.forEach((x) => chips.append(el('span', 'chip', x)));
     a.topics.forEach((x) => chips.append(el('span', 'chip', '#' + x)));
     if (a.invited) chips.append(el('span', 'chip inv', 'invited'));
-    const acts = el('div', 'acts'), kick = el('button', 'btn', 'Kick'); kick.disabled = !a.online;
-    kick.onclick = () => api('POST', '/api/agents/' + encodeURIComponent(a.id) + '/kick');
+    const acts = el('div', 'acts'), kick = el('button', 'btn', a.online ? 'Kick' : 'Remove');
+    kick.onclick = a.online ? () => api('POST', '/api/agents/' + encodeURIComponent(a.id) + '/kick')
+      : () => confirm(`Remove ${a.id}?${a.invited ? ' Its invite is revoked.' : ''} Queued messages are dropped.`) && api('DELETE', '/api/agents/' + encodeURIComponent(a.id));
     acts.append(kick);
     c.append(top, meta, m2, m3, chips, acts); ag.append(c);
   }

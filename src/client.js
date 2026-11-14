@@ -90,7 +90,7 @@ export class HubClient extends EventEmitter {
         else if ((f.type === 'ack' || f.type === 'agents' || f.type === 'error') && this.pending.has(f.ref)) { this.pending.get(f.ref)(f); this.pending.delete(f.ref); }
       });
       ws.on('close', (code) => {
-        if (code === 4001 || code === 4002) { this.reconnect = false; this.emit('denied', new Error(code === 4001 ? 'invite revoked' : 'kicked by hub owner')); }
+        if (code === 4000 || code === 4001 || code === 4002) { this.reconnect = false; this.emit('denied', new Error(code === 4000 ? 'replaced by another connection with the same id' : code === 4001 ? 'invite revoked' : 'kicked by hub owner')); }
         this.emit('close');
         if (first) reject(new Error('connection closed (bad token or id?)'));
         else this.#scheduleReconnect();
