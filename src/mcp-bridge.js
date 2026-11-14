@@ -48,24 +48,29 @@ export async function runMcpBridge(env = process.env) {
   };
   const textOf = (m) => (typeof m.content?.body === 'string' ? m.content.body : JSON.stringify(m.content?.body));
   const socketText = (m) => `[LAN message from ${m.from}${m.thread ? ` thread=${m.thread}` : ''}${m.topic ? ` topic=${m.topic}` : ''} id=${m.id}]\n${textOf(m)}\n(Reply with lan_send to "${m.from}", inReplyTo "${m.id}".)`;
-  const pushSocket = (m) => {
+  const pushSocket = (content) => {
     const sock = env.CLAUDE_CODE_MESSAGING_SOCKET;
     const c = net.createConnection(sock);
     c.setTimeout(5000, () => c.destroy());
     c.on('error', (e) => console.error('lan-agent-hub: socket push failed:', e.code ?? e.message));
     c.on('connect', () => {
-      const frame = JSON.stringify({ type: 'user', message: { role: 'user', content: socketText(m) } });
+      const frame = JSON.stringify({ type: 'user', message: { role: 'user', content } });
       c.end((env.CLAUDE_CODE_MESSAGING_TOKEN ? JSON.stringify({ type: 'auth', token: env.CLAUDE_CODE_MESSAGING_TOKEN }) + '\n' : '') + frame + '\n');
     });
   };
-  const pushChannel = (m) => {
-    const meta = { from: m.from, to: m.to, id: m.id, ...(m.thread && { thread: m.thread }), ...(m.topic && { topic: m.topic }) };
-    for (const s of servers) s.server.notification({ method: 'notifications/claude/channel', params: { content: textOf(m), meta } }).catch(() => {});
+  const pushChannel = (content, meta) => {
+    for (const s of servers) s.server.notification({ method: 'notifications/claude/channel', params: { content, meta } }).catch(() => {});
   };
   const push = (m) => {
     const mode = pushMode();
-    if (mode.socket) try { pushSocket(m); } catch (e) { console.error('lan-agent-hub: socket push failed:', e.message); }
-    if (mode.channel) pushChannel(m);
+    if (mode.socket) try { pushSocket(socketText(m)); } catch (e) { console.error('lan-agent-hub: socket push failed:', e.message); }
+    if (mode.channel) pushChannel(textOf(m), { from: m.from, to: m.to, id: m.id, ...(m.thread && { thread: m.thread }), ...(m.topic && { topic: m.topic }) });
+  };
+  // Tell the model about a hub event that is not an agent message (e.g. a join request was resolved).
+  const pushNotice = (body) => {
+    const mode = pushMode();
+    if (mode.socket) try { pushSocket(`[LAN hub notice]\n${body}`); } catch (e) { console.error('lan-agent-hub: socket push failed:', e.message); }
+    if (mode.channel) pushChannel(body, { from: 'lan-agent-hub', kind: 'notice' });
   };
 
   const credKey = (url, name) => name ?? url;
@@ -121,7 +126,7 @@ export async function runMcpBridge(env = process.env) {
       });
       return text(`connected to ${url} as ${need().agent.id}`);
     });
-  reg('lan_request_join', 'Ask the hub owner for admission when you have no token/invite. Sends a request the owner approves in their dashboard (or `lah approve`); once approved this session joins automatically. Returns immediately; check lan_join_status.',
+  reg('lan_request_join', 'Ask the hub owner for admission when you have no token/invite. Sends a request the owner approves in their dashboard (or `lah approve`); once approved this session joins automatically and is notified. Returns immediately; do not poll.',
     z.object({ url: z.string().optional(), agentId: z.string().optional() }),
     async ({ url, agentId }) => {
       if (joinState.status === 'waiting') return text('a join request is already waiting for the owner');
@@ -132,11 +137,22 @@ export async function runMcpBridge(env = process.env) {
       const name = hubs.find((h) => h.url === target)?.name ?? null;
       joinState = { status: 'waiting', hub: target, agentId: wanted };
       requestJoin(target, { agentId: wanted, name: env.LAH_AGENT_NAME }).then(async (r) => {
-        if (r.status !== 'approved') { joinState = { status: r.status, hub: target, detail: r.reason }; return; }
-        try { await connectTo(target, { token: r.code, name }); if (primary && r.agentId === baseId) saveCredential(credKey(target, name), { agentId: r.agentId, code: r.code }, env); joinState = { status: 'joined', hub: target, agentId: r.agentId }; }
-        catch (e) { joinState = { status: 'error', hub: target, detail: e.message }; }
-      }, (e) => { joinState = { status: 'error', hub: target, detail: e.message }; });
-      return text(`join request sent to ${target} as "${wanted}". Ask the hub owner to approve it (dashboard Join requests, or \`lah approve\`), then call lan_join_status.`);
+        if (r.status !== 'approved') {
+          joinState = { status: r.status, hub: target, detail: r.reason };
+          pushNotice(`Your join request to ${target} was ${r.status === 'timeout' ? 'not answered in time (timed out)' : 'denied'}${r.reason ? ` (${r.reason})` : ''}.`);
+          return;
+        }
+        try {
+          await connectTo(target, { token: r.code, name });
+          if (primary && r.agentId === baseId) saveCredential(credKey(target, name), { agentId: r.agentId, code: r.code }, env);
+          joinState = { status: 'joined', hub: target, agentId: r.agentId };
+          pushNotice(`Your join request to ${target} was approved. You are now connected as "${r.agentId}"; no need to call lan_join_status. Use lan_list_agents / lan_send.`);
+        } catch (e) {
+          joinState = { status: 'error', hub: target, detail: e.message };
+          pushNotice(`Your join request to ${target} was approved but connecting failed: ${e.message}`);
+        }
+      }, (e) => { joinState = { status: 'error', hub: target, detail: e.message }; pushNotice(`Join request to ${target} failed: ${e.message}`); });
+      return text(`join request sent to ${target} as "${wanted}". Ask the hub owner to approve it (dashboard Join requests, or \`lah approve\`), you will be notified when it is resolved (lan_join_status also works).`);
     });
   reg('lan_join_status', 'Progress of your join request: waiting | joined | denied | timeout | error.', z.object({}), async () => text(joinState));
   reg('lan_list_joins', 'Hub owner only: pending join requests (id, agentId, ip).', z.object({}), async () => text(await admin('GET', '/api/joins')));
