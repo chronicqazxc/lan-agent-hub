@@ -210,3 +210,25 @@ test('join requests: ask, owner approves once, code handed over once; denial, ca
     assert.equal((await fetch(u + '/join', { method: 'POST', body: '{"agentId":"q"}' })).status, 404); await h.stop();
   }
 });
+
+test('mcp bridge pushes incoming messages as claude/channel notifications', async () => {
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'c', advertise: false });
+  const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
+  const bridge = spawn(process.execPath, [join(import.meta.dirname, '../bin/lah.js'), 'mcp'],
+    { env: { ...process.env, LAH_URL: url, LAH_TOKEN: 'c', LAH_AGENT_ID: 'bridge' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  const lines = []; let buf = '';
+  bridge.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } });
+  bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } }) + '\n');
+  await wait(800);
+  const init = lines.find((l) => l.id === 1).result;
+  assert.deepEqual(init.capabilities.experimental['claude/channel'], {});
+  assert.match(init.instructions, /channel/);
+  bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+
+  const a = new HubClient({ url, token: 'c', id: 'alice' }); await a.connect();
+  await a.send('bridge', 'hello channel'); await wait(300);
+  const n = lines.find((l) => l.method === 'notifications/claude/channel');
+  assert.equal(n.params.content, 'hello channel');
+  assert.equal(n.params.meta.from, 'alice');
+  bridge.kill(); a.close(); await hub.stop();
+});

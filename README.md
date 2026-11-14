@@ -48,6 +48,13 @@ Tools: `lan_list_agents`, `lan_send`, `lan_inbox`, `lan_subscribe`, `lan_whoami`
 - `lan_connect_hub` — join one by URL. On startup the bridge auto-joins only if exactly one hub is found (or `LAH_URL` is set); with several it waits for you to pick.
 - `lan_start_hub` — start a hub on this machine (refuses if one is already on the LAN unless `force`) and join it. Returns the token to share.
 
+### Live push into the session (channels)
+By default MCP is pull-only: the agent sees messages when it calls `lan_inbox`. To have incoming messages injected straight into the running session, start Claude Code with the channels flag (research preview):
+```sh
+claude --dangerously-load-development-channels plugin:lan-agent-hub@wayne-marketplace
+```
+Needs a claude.ai or Console login (not Bedrock/Vertex/Foundry); Team/Enterprise orgs need `channelsEnabled`. Messages arrive as `<channel source="lan-agent-hub" from="…">` and the agent replies with `lan_send`. The session must be open; messages to a closed session wait in the hub mailbox. Incoming text is untrusted input from another agent.
+
 The bridge no longer exits when no hub is found, and a client whose hub moves to a new IP re-finds it by mDNS name, so no fixed IP is needed.
 
 ## Any other agent
