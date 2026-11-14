@@ -2,7 +2,9 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { Bonjour } from 'bonjour-service';
 import { hostname } from 'node:os';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { dirname } from 'node:path';
 
 const UI_HTML = readFileSync(new URL('./ui.html', import.meta.url), 'utf8');
 const LOG_MAX = 200;
@@ -17,7 +19,8 @@ const MAX_QUEUE = 500;
  * Central hub: registry + router + offline mailboxes.
  * Agents connect via WebSocket (live) or plain HTTP (poll/POST) — no LLM-specific format anywhere.
  */
-export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null, advertise = true, log = () => {} } = {}) {
+export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null, advertise = true, inviteOnly = false, invitesFile = null, log = () => {} } = {}) {
+  inviteOnly = inviteOnly && !!token; // without a token there is nothing to restrict
   /** @type {Map<string, {info:object, ws:import('ws').WebSocket|null, lastSeen:number, topics:Set<string>}>} */
   const agents = new Map();
   /** @type {Map<string, object[]>} offline/HTTP mailboxes */
@@ -27,6 +30,24 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
   const log_ = [];
   const sseClients = new Set();
   const startedAt = Date.now();
+
+  // ---- invites: per-agent credentials. The admin `token` manages them; an invite code only lets
+  // its holder act as one agent id. Only a SHA-256 of each code is stored (shown once at creation).
+  const hashCode = (c) => createHash('sha256').update(c).digest('hex');
+  /** @type {Map<string,{agentId:string,name:string,hash:string,createdAt:string,lastUsedAt:string|null}>} by agentId */
+  const invites = new Map();
+  /** @type {Map<string,object>} by code hash */
+  const inviteByHash = new Map();
+  if (invitesFile && existsSync(invitesFile)) {
+    try { for (const i of JSON.parse(readFileSync(invitesFile, 'utf8'))) { invites.set(i.agentId, i); inviteByHash.set(i.hash, i); } }
+    catch (e) { log(`could not read ${invitesFile}: ${e.message}`); }
+  }
+  const saveInvites = () => {
+    if (!invitesFile) return;
+    mkdirSync(dirname(invitesFile), { recursive: true });
+    writeFileSync(invitesFile, JSON.stringify([...invites.values()], null, 2), { mode: 0o600 });
+  };
+  const publicInvite = (i) => ({ agentId: i.agentId, name: i.name, createdAt: i.createdAt, lastUsedAt: i.lastUsedAt });
   let timer = null;
 
   const preview = (m) => { const b = m.content?.body; const t = typeof b === 'string' ? b : JSON.stringify(b); return t.length > 160 ? t.slice(0, 160) + '…' : t; };
@@ -35,9 +56,10 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
   function state() {
     const pend = pendingIds();
     return {
-      now: new Date().toISOString(), uptimeSec: Math.round((Date.now() - startedAt) / 1000), auth: !!token, v: PROTOCOL_VERSION,
+      now: new Date().toISOString(), uptimeSec: Math.round((Date.now() - startedAt) / 1000), auth: !!token, inviteOnly, v: PROTOCOL_VERSION,
+      invites: [...invites.values()].map(publicInvite),
       agents: [...agents.values()].map((a) => ({
-        ...publicAgent(a),
+        ...publicAgent(a), invited: invites.has(a.info.id),
         connectedAt: a.connectedAt ? new Date(a.connectedAt).toISOString() : null,
         sent: a.sent ?? 0, received: a.received ?? 0,
         queue: (mailboxes.get(a.info.id) ?? []).map((m) => ({ id: m.id, from: m.from, ts: m.ts, preview: preview(m) })),
@@ -51,11 +73,20 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
     timer = setTimeout(() => { timer = null; const d = `data: ${JSON.stringify(state())}\n\n`; for (const r of sseClients) r.write(d); }, 40);
   }
 
-  const authOk = (req, url) => {
-    if (!token) return true;
+  /** Who is calling? null = rejected; {role:'admin'} = hub token (or no auth); {role:'agent', agentId} = invite code. */
+  const identify = (req, url) => {
+    if (!token) return { role: 'admin' };
     const h = req.headers.authorization;
-    return h === `Bearer ${token}` || url.searchParams.get('token') === token;
+    for (const c of [h?.startsWith('Bearer ') ? h.slice(7) : null, url.searchParams.get('token')]) {
+      if (!c) continue;
+      if (c === token) return { role: 'admin' };
+      const inv = inviteByHash.get(hashCode(c));
+      if (inv) return { role: 'agent', agentId: inv.agentId, invite: inv };
+    }
+    return null;
   };
+  /** May this caller send/receive as agent `id`? Invite holders only as themselves; the hub token not at all when inviteOnly. */
+  const canActAs = (cred, id) => (cred.role === 'agent' ? cred.agentId === id : !inviteOnly);
 
   const publicAgent = (a) => ({ ...a.info, online: !!a.ws, topics: [...a.topics], lastSeen: new Date(a.lastSeen).toISOString() });
   const listAgents = () => [...agents.values()].map(publicAgent);
@@ -135,8 +166,39 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/ui')) { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(UI_HTML); }
     if (url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
     if (url.pathname === '/health') return json(res, 200, { ok: true, v: PROTOCOL_VERSION });
-    if (!authOk(req, url)) return json(res, 401, { error: 'unauthorized' });
+    const cred = identify(req, url);
+    if (!cred) return json(res, 401, { error: 'unauthorized' });
+    if (url.pathname.startsWith('/api/') && cred.role !== 'admin') return json(res, 403, { error: 'admin token required' });
     try {
+      if (req.method === 'GET' && url.pathname === '/api/invites') return json(res, 200, [...invites.values()].map(publicInvite));
+      if (req.method === 'POST' && url.pathname === '/api/invites') {
+        if (!token) return json(res, 400, { error: 'invites need a hub token (start the hub with --token)' });
+        const body = await readBody(req);
+        if (!validAgentId(body.agentId)) return json(res, 400, { error: 'bad agent id' });
+        if (invites.has(body.agentId)) return json(res, 409, { error: 'an invite for this agent already exists; revoke it first' });
+        const code = 'lah_' + randomBytes(18).toString('base64url');
+        const inv = { agentId: body.agentId, name: String(body.name ?? body.agentId).slice(0, 80), hash: hashCode(code), createdAt: new Date().toISOString(), lastUsedAt: null };
+        invites.set(inv.agentId, inv); inviteByHash.set(inv.hash, inv); saveInvites(); changed();
+        log(`invite created for ${inv.agentId}`);
+        return json(res, 201, { ...publicInvite(inv), code });
+      }
+      let m2 = url.pathname.match(/^\/api\/invites\/([^/]+)$/);
+      if (req.method === 'DELETE' && m2) { // revoke: disconnect, forget the agent, drop its queued mail
+        const id = decodeURIComponent(m2[1]); const inv = invites.get(id);
+        if (!inv) return json(res, 404, { error: 'no such invite' });
+        invites.delete(id); inviteByHash.delete(inv.hash); saveInvites();
+        const rec = agents.get(id);
+        if (rec) { const ws = rec.ws; rec.ws = null; broadcastPresence(id, false); agents.delete(id); mailboxes.delete(id); ws?.close(4001, 'invite revoked'); }
+        changed(); log(`invite revoked for ${id}`);
+        return json(res, 200, { ok: true });
+      }
+      m2 = url.pathname.match(/^\/api\/agents\/([^/]+)\/kick$/);
+      if (req.method === 'POST' && m2) { // disconnect only; with a shared token the agent may reconnect, an invite holder too until revoked
+        const rec = agents.get(decodeURIComponent(m2[1]));
+        if (!rec) return json(res, 404, { error: 'unknown agent' });
+        const was = !!rec.ws; rec.ws?.close(4002, 'kicked by hub owner');
+        return json(res, 200, { ok: true, wasOnline: was });
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, state());
       if (req.method === 'GET' && url.pathname === '/api/events') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
@@ -147,12 +209,15 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
       if (req.method === 'POST' && url.pathname === '/agents') { // HTTP-only agents register here
         const info = await readBody(req);
         if (!validAgentId(info.id)) return json(res, 400, { error: 'bad agent id' });
+        if (!canActAs(cred, info.id)) return json(res, 403, { error: 'not allowed to act as this agent' });
         register(info, null); return json(res, 200, { ok: true });
       }
       if (req.method === 'POST' && url.pathname === '/messages') {
         const body = await readBody(req);
         const msg = body.type === 'message' ? body : makeMessage({ from: body.from, to: body.to, content: body.content, topic: body.topic, thread: body.thread, inReplyTo: body.inReplyTo });
+        if (cred.role === 'agent') msg.from = cred.agentId; // invite holders can only speak as themselves
         if (!validAgentId(msg.from)) return json(res, 400, { error: 'bad "from"' });
+        if (!canActAs(cred, msg.from)) return json(res, 403, { error: 'hub is invite-only: use an invite code to act as an agent' });
         const err = validateMessage(msg); if (err) return json(res, 400, { error: err });
         const r = route(msg);
         if (r.unknown) return json(res, 404, { error: 'unknown recipient', ...r });
@@ -161,6 +226,7 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
       const m = url.pathname.match(/^\/inbox\/([^/]+)$/);
       if (req.method === 'GET' && m) { // poll & drain
         const id = decodeURIComponent(m[1]);
+        if (!canActAs(cred, id)) return json(res, 403, { error: 'not allowed to read this inbox' });
         const a = agents.get(id); if (a) a.lastSeen = Date.now();
         const q = mailboxes.get(id) ?? []; mailboxes.set(id, []);
         if (a) a.received = (a.received ?? 0) + q.length;
@@ -175,11 +241,12 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://x');
-    if (url.pathname !== '/ws' || !authOk(req, url)) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws));
+    const cred = url.pathname === '/ws' ? identify(req, url) : null;
+    if (!cred || (cred.role === 'admin' && inviteOnly)) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, cred));
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, cred) => {
     let id = null;
     const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
     ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; });
@@ -187,7 +254,10 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
     ws.on('message', (raw) => {
       let f; try { f = JSON.parse(raw); } catch { return send({ type: 'error', error: 'invalid JSON' }); }
       if (!id) {
-        if (f.type !== 'hello' || !validAgentId(f.agent?.id)) { send({ type: 'error', error: 'first frame must be hello with valid agent.id' }); return ws.close(); }
+        if (f.type !== 'hello' || !f.agent || (cred.role !== 'agent' && !validAgentId(f.agent.id))) { send({ type: 'error', error: 'first frame must be hello with valid agent.id' }); return ws.close(); }
+        if (cred.role === 'agent') { // an invite fixes the identity; whatever id the client asked for is replaced
+          f.agent.id = cred.agentId; cred.invite.lastUsedAt = new Date().toISOString(); saveInvites();
+        }
         id = f.agent.id;
         const rec = register({ ...f.agent }, ws);
         log(`+ ${id} connected`);
@@ -231,7 +301,7 @@ export function createHub({ port = DEFAULT_PORT, host = '0.0.0.0', token = null,
       const actual = server.address().port;
       if (advertise) {
         bonjour = new Bonjour();
-        bonjour.publish({ name: `lan-agent-hub@${hostname()}`, type: SERVICE_TYPE, port: actual, txt: { v: String(PROTOCOL_VERSION), auth: token ? '1' : '0' } });
+        bonjour.publish({ name: `lan-agent-hub@${hostname()}`, type: SERVICE_TYPE, port: actual, txt: { v: String(PROTOCOL_VERSION), auth: token ? '1' : '0', invite: inviteOnly ? '1' : '0' } });
       }
       resolve(actual);
     })),

@@ -11,6 +11,14 @@ node bin/lah.js send laptop-bot "hello"
 node bin/lah.js agents
 ```
 
+## Who can join
+- **Open mode** (default): anyone with the hub token can join. Fine for a trusted home LAN.
+- **Per-agent invites**: `lah invite bob-laptop` prints a code (shown once); bob sets `LAH_TOKEN=<code>` and can only ever be `bob-laptop`. `lah revoke bob-laptop` disconnects and bans that one agent; `lah kick <id>` just disconnects. `lah invites` lists them. The dashboard has the same controls (Invites panel, Kick button).
+- **Invite-only**: `lah hub --token ADMIN --invite-only` — the hub token can no longer join, only manage; keep it to yourself and hand out invites.
+- **One hub per PC**: `lah hub` refuses to start if one is already running here (lock file in `~/.lan-agent-hub/`). Invites are saved there too.
+
+Claude Code tools for the hub owner: `lan_create_invite`, `lan_list_invites`, `lan_revoke_invite`, `lan_kick` (need the admin token: `LAH_ADMIN_TOKEN`, or the session that ran `lan_start_hub`; pass `inviteOnly` there for invite-only mode).
+
 ## Dashboard
 Open `http://<hub-ip>:7788/` — live agent connection status, per-agent queue depth, the pending queue contents, and a message feed (last 200). It asks for the token when auth is on (or open `/?token=mysecret`). Data comes from `GET /api/state` and the SSE stream `GET /api/events`.
 
@@ -34,7 +42,12 @@ Dependencies install automatically on first launch. Optional: `LAH_AGENT_ID`, `L
 ```sh
 claude mcp add lan-agent-hub -e LAH_TOKEN=mysecret -e LAH_AGENT_ID=mac-claude -- node /Users/waynehsiao/Developer/lan-agent-hub/bin/lah.js mcp
 ```
-Tools: `lan_list_agents`, `lan_send`, `lan_inbox`, `lan_subscribe`, `lan_whoami`.
+Tools: `lan_list_agents`, `lan_send`, `lan_inbox`, `lan_subscribe`, `lan_whoami`, plus hub management:
+- `lan_discover_hubs` — scan the LAN (mDNS) for running hubs.
+- `lan_connect_hub` — join one by URL. On startup the bridge auto-joins only if exactly one hub is found (or `LAH_URL` is set); with several it waits for you to pick.
+- `lan_start_hub` — start a hub on this machine (refuses if one is already on the LAN unless `force`) and join it. Returns the token to share.
+
+The bridge no longer exits when no hub is found, and a client whose hub moves to a new IP re-finds it by mDNS name, so no fixed IP is needed.
 
 ## Any other agent
 `curl -XPOST hub:7788/messages -H 'Authorization: Bearer mysecret' -d '{"from":"my-script","to":"mac-claude","content":"hi"}'`

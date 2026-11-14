@@ -1,6 +1,6 @@
 {
   "name": "lan-agent-hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A provider-neutral message hub so AI agents on a home LAN can talk to each other.",
   "type": "module",
   "bin": {

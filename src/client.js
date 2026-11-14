@@ -3,17 +3,24 @@ import { EventEmitter } from 'node:events';
 import { Bonjour } from 'bonjour-service';
 import { makeMessage, SERVICE_TYPE } from './protocol.js';
 
-/** Find a hub on the LAN via mDNS. Resolves to "http://host:port" or null. */
-export function discoverHub(timeoutMs = 3000) {
+/** Find all hubs on the LAN via mDNS. Resolves to [{ name, url, auth }] after timeoutMs. */
+export function discoverHubs(timeoutMs = 3000) {
   return new Promise((resolve) => {
     const b = new Bonjour();
-    const done = (v) => { clearTimeout(t); browser.stop(); b.destroy(); resolve(v); };
+    const found = new Map();
     const browser = b.find({ type: SERVICE_TYPE }, (svc) => {
       const addr = svc.addresses?.find((a) => a.includes('.')) ?? svc.host;
-      done(`http://${addr}:${svc.port}`);
+      const url = `http://${addr}:${svc.port}`;
+      const flag = (v) => v === '1' || v === 1;
+      found.set(url, { name: svc.name, url, auth: flag(svc.txt?.auth), inviteOnly: flag(svc.txt?.invite) });
     });
-    const t = setTimeout(() => done(null), timeoutMs);
+    setTimeout(() => { browser.stop(); b.destroy(); resolve([...found.values()]); }, timeoutMs);
   });
+}
+
+/** Find a hub on the LAN via mDNS. Resolves to "http://host:port" (first found) or null. */
+export async function discoverHub(timeoutMs = 3000) {
+  return (await discoverHubs(timeoutMs))[0]?.url ?? null;
 }
 
 /**
@@ -21,31 +28,50 @@ export function discoverHub(timeoutMs = 3000) {
  * Keeps a local `inbox` buffer so pull-style hosts (e.g. MCP tools) can drain it.
  */
 export class HubClient extends EventEmitter {
-  constructor({ url, token, id, name, kind, description, capabilities = [], subscribe = [] }) {
+  /** `rediscover` (optional): async () => new hub URL | null, consulted before each reconnect attempt. */
+  constructor({ url, token, id, name, kind, description, capabilities = [], subscribe = [], rediscover = null }) {
     super();
-    this.url = url.replace(/^http/, 'ws').replace(/\/$/, '') + '/ws' + (token ? `?token=${encodeURIComponent(token)}` : '');
+    this.token = token;
+    this.rediscover = rediscover;
+    this.#setUrl(url);
     this.agent = { id, name, kind, description, capabilities, subscribe };
     this.inbox = [];
     this.pending = new Map();
     this.reconnect = true;
+  }
+  #setUrl(url) {
+    this.url = url.replace(/^http/, 'ws').replace(/\/$/, '') + '/ws' + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
+  }
+  #scheduleReconnect() {
+    if (!this.reconnect) return;
+    setTimeout(async () => {
+      if (!this.reconnect) return;
+      const u = this.rediscover ? await this.rediscover().catch(() => null) : null;
+      if (u) this.#setUrl(u);
+      this.connect().catch(() => this.#scheduleReconnect());
+    }, 2000);
   }
   connect() {
     return new Promise((resolve, reject) => {
       const ws = (this.ws = new WebSocket(this.url));
       let first = true;
       ws.on('open', () => ws.send(JSON.stringify({ type: 'hello', agent: this.agent })));
-      ws.on('error', (e) => { if (first) reject(e); });
+      ws.on('error', (e) => {
+        if (/\b401\b/.test(e.message)) { this.reconnect = false; this.emit('denied', e); } // bad/revoked credential: stop retrying
+        if (first) reject(e);
+      });
       ws.on('message', (raw) => {
         const f = JSON.parse(raw);
-        if (f.type === 'welcome') { this.agents = f.agents; if (first) { first = false; resolve(f); } this.emit('open', f); }
+        if (f.type === 'welcome') { this.agents = f.agents; if (f.agent?.id) this.agent.id = f.agent.id; /* an invite fixes the id */ if (first) { first = false; resolve(f); } this.emit('open', f); }
         else if (f.type === 'message') { this.inbox.push(f); this.emit('message', f); }
         else if (f.type === 'presence') this.emit('presence', f);
         else if ((f.type === 'ack' || f.type === 'agents' || f.type === 'error') && this.pending.has(f.ref)) { this.pending.get(f.ref)(f); this.pending.delete(f.ref); }
       });
-      ws.on('close', () => {
+      ws.on('close', (code) => {
+        if (code === 4001 || code === 4002) { this.reconnect = false; this.emit('denied', new Error(code === 4001 ? 'invite revoked' : 'kicked by hub owner')); }
         this.emit('close');
-        if (this.reconnect && !first) setTimeout(() => this.connect().catch(() => {}), 2000);
-        else if (first) reject(new Error('connection closed (bad token or id?)'));
+        if (first) reject(new Error('connection closed (bad token or id?)'));
+        else this.#scheduleReconnect();
       });
     });
   }
