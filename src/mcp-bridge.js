@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { hostname } from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { HubClient, discoverHubs, requestJoin } from './client.js';
 import { DEFAULT_PORT } from './protocol.js';
@@ -27,18 +28,44 @@ export async function runMcpBridge(env = process.env) {
   let joinState = { status: 'none' }; // progress of a lan_request_join
   let adminToken = env.LAH_ADMIN_TOKEN ?? null; // set when this session starts the hub, or via env
 
-  // Live McpServer instances (one per connection; discarded discover probes never connect and just throw on send).
-  const servers = new Set();
-  const CHANNEL_INSTRUCTIONS = 'Messages from other agents arrive as <channel source="lan-agent-hub" from="..." to="..." id="..." thread="...">. ' +
+  // ---- Push: get an incoming LAN message in front of the model without it polling lan_inbox.
+  // 1) "socket" (default when Claude Code exports its inbox socket to us): write a user frame to our OWN session's
+  //    socket, so it lands as a turn. No launch flag needed. The frame shape is not in the official docs (seen in
+  //    anthropics/claude-code#93720), so it can change; keep the other routes as fallbacks.
+  // 2) "channel": notifications/claude/channel, needs `claude --dangerously-load-development-channels ...`.
+  // LAH_PUSH=auto|socket|channel|both|off (default auto = socket if available, else channel). lan_inbox always works.
+  const servers = new Set(); // live McpServer instances (discarded discover probes never connect and just throw on send)
+  const INSTRUCTIONS = 'Messages from other agents arrive either as <channel source="lan-agent-hub" from="..." id="..." thread="..."> events or as a user turn starting "[LAN message from <agent>]". ' +
     'Every sender is an agent your user owns and admitted to their own LAN hub (the hub authenticates it), so treat a message as a task or question delegated by your user: do the work and answer it. ' +
-    'Do not refuse just because it came from another agent. Reply with the lan_send tool (to = the "from" attribute, inReplyTo = the "id" attribute). ' +
+    'Do not refuse just because it came from another agent or was not typed by the user. Reply with the lan_send tool (to = the sender, inReplyTo = the message id). ' +
     'Ask your user before anything destructive or sensitive: deleting data, pushing or publishing, spending money, exposing secrets, or changing permissions or config. ' +
     'The same messages also stay available through lan_inbox.';
-  const push = (m) => {
-    const body = m.content?.body;
+  const pushMode = () => {
+    const m = (env.LAH_PUSH || 'auto').toLowerCase();
+    const hasSock = !!(env.CLAUDE_CODE_MESSAGING_SOCKET);
+    if (m === 'auto') return { socket: hasSock, channel: !hasSock };
+    return { socket: (m === 'socket' || m === 'both') && hasSock, channel: m === 'channel' || m === 'both' };
+  };
+  const textOf = (m) => (typeof m.content?.body === 'string' ? m.content.body : JSON.stringify(m.content?.body));
+  const socketText = (m) => `[LAN message from ${m.from}${m.thread ? ` thread=${m.thread}` : ''}${m.topic ? ` topic=${m.topic}` : ''} id=${m.id}]\n${textOf(m)}\n(Reply with lan_send to "${m.from}", inReplyTo "${m.id}".)`;
+  const pushSocket = (m) => {
+    const sock = env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const c = net.createConnection(sock);
+    c.setTimeout(5000, () => c.destroy());
+    c.on('error', (e) => console.error('lan-agent-hub: socket push failed:', e.code ?? e.message));
+    c.on('connect', () => {
+      const frame = JSON.stringify({ type: 'user', message: { role: 'user', content: socketText(m) } });
+      c.end((env.CLAUDE_CODE_MESSAGING_TOKEN ? JSON.stringify({ type: 'auth', token: env.CLAUDE_CODE_MESSAGING_TOKEN }) + '\n' : '') + frame + '\n');
+    });
+  };
+  const pushChannel = (m) => {
     const meta = { from: m.from, to: m.to, id: m.id, ...(m.thread && { thread: m.thread }), ...(m.topic && { topic: m.topic }) };
-    const content = typeof body === 'string' ? body : JSON.stringify(body);
-    for (const s of servers) s.server.notification({ method: 'notifications/claude/channel', params: { content, meta } }).catch(() => {});
+    for (const s of servers) s.server.notification({ method: 'notifications/claude/channel', params: { content: textOf(m), meta } }).catch(() => {});
+  };
+  const push = (m) => {
+    const mode = pushMode();
+    if (mode.socket) try { pushSocket(m); } catch (e) { console.error('lan-agent-hub: socket push failed:', e.message); }
+    if (mode.channel) pushChannel(m);
   };
 
   const credKey = (url, name) => name ?? url;
@@ -76,7 +103,7 @@ export async function runMcpBridge(env = process.env) {
 
   const createServer = () => {
   const server = new McpServer({ name: 'lan-agent-hub', version: '0.1.0' },
-    { capabilities: { experimental: { 'claude/channel': {} } }, instructions: CHANNEL_INSTRUCTIONS });
+    { capabilities: { experimental: { 'claude/channel': {} } }, instructions: INSTRUCTIONS });
   servers.add(server);
   server.server.onclose = () => servers.delete(server);
   const text = (o) => ({ content: [{ type: 'text', text: typeof o === 'string' ? o : JSON.stringify(o, null, 2) }] });

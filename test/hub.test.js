@@ -215,7 +215,7 @@ test('mcp bridge pushes incoming messages as claude/channel notifications', asyn
   const hub = createHub({ port: 0, host: '127.0.0.1', token: 'c', advertise: false });
   const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
   const bridge = spawn(process.execPath, [join(import.meta.dirname, '../bin/lah.js'), 'mcp'],
-    { env: { ...process.env, LAH_URL: url, LAH_TOKEN: 'c', LAH_AGENT_ID: 'bridge' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    { env: { ...process.env, LAH_URL: url, LAH_TOKEN: 'c', LAH_AGENT_ID: 'bridge', CLAUDE_CODE_MESSAGING_SOCKET: '' }, stdio: ['pipe', 'pipe', 'ignore'] });
   const lines = []; let buf = '';
   bridge.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } });
   bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } }) + '\n');
@@ -278,4 +278,24 @@ test('mcp bridge remembers its approved invite and rejoins after a restart with 
   assert.equal((await whoami(b)).id, 'mac-claude');
   assert.equal((await (await fetch(`${url}/api/joins`, { headers: H })).json()).length, 0);
   b.p.kill(); await hub.stop();
+});
+
+test('mcp bridge pushes incoming messages to the session inbox socket as a user frame', async () => {
+  const { createServer } = await import('node:net');
+  const sockPath = join(mkdtempSync(join(tmpdir(), 'lah-sock-')), 'in.sock');
+  const got = [];
+  const sock = createServer((c) => { let b = ''; c.on('data', (d) => { b += d; }); c.on('end', () => got.push(...b.split('\n').filter(Boolean).map((l) => JSON.parse(l)))); });
+  await new Promise((r) => sock.listen(sockPath, r));
+  const hub = createHub({ port: 0, host: '127.0.0.1', token: 'c', advertise: false });
+  const port = await hub.start(); const url = `http://127.0.0.1:${port}`;
+  const bridge = spawn(process.execPath, [join(import.meta.dirname, '../bin/lah.js'), 'mcp'],
+    { env: { ...process.env, LAH_URL: url, LAH_TOKEN: 'c', LAH_AGENT_ID: 'bridge-sock', LAH_HOME: mkdtempSync(join(tmpdir(), 'lah-h-')), CLAUDE_CODE_MESSAGING_SOCKET: sockPath, CLAUDE_CODE_MESSAGING_TOKEN: 'tok123' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } }) + '\n');
+  await wait(800);
+  const a = new HubClient({ url, token: 'c', id: 'alice' }); await a.connect();
+  await a.send('bridge-sock', 'hello socket'); await wait(500);
+  assert.deepEqual(got[0], { type: 'auth', token: 'tok123' });
+  assert.equal(got[1].type, 'user'); assert.equal(got[1].message.role, 'user');
+  assert.match(got[1].message.content, /^\[LAN message from alice /); assert.match(got[1].message.content, /hello socket/);
+  bridge.kill(); a.close(); sock.close(); await hub.stop();
 });

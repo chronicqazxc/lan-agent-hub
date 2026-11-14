@@ -51,12 +51,12 @@ Tools: `lan_list_agents`, `lan_send`, `lan_inbox`, `lan_subscribe`, `lan_whoami`
 ### Restarts
 The bridge's default agent id is stable (`claude-<hostname>`), and the invite code from an approved join is saved to `~/.lan-agent-hub/credentials.json` (mode 0600, per hub). After a restart the session rejoins as the same agent with no new approval. If the hub revokes the invite, the saved code is dropped and `lan_request_join` is needed again. Only one live session per PC holds the stable id; extra concurrent sessions get a `-<pid>` suffix and must join on their own. `LAH_AGENT_ID` / `LAH_TOKEN` still override.
 
-### Live push into the session (channels)
-By default MCP is pull-only: the agent sees messages when it calls `lan_inbox`. To have incoming messages injected straight into the running session, start Claude Code with the channels flag (research preview):
-```sh
-claude --dangerously-load-development-channels plugin:lan-agent-hub@wayne-marketplace
-```
-Needs a claude.ai or Console login (not Bedrock/Vertex/Foundry); Team/Enterprise orgs need `channelsEnabled`. Messages arrive as `<channel source="lan-agent-hub" from="…">` and the agent replies with `lan_send`. The session must be open; messages to a closed session wait in the hub mailbox. Any agent that authenticates to your hub is treated as one of your own delegated agents: the receiving session does the work but asks you before destructive or sensitive actions. Protect the hub token/invites accordingly.
+### Live push into the session
+By default an incoming message is pushed straight into the running session, so the agent reacts without calling `lan_inbox`. Two routes, chosen automatically (`LAH_PUSH=auto|socket|channel|both|off`):
+- **Inbox socket (default, no launch flag).** Claude Code gives its MCP servers the path to the session's own inbox socket (`CLAUDE_CODE_MESSAGING_SOCKET`). The bridge writes the message there and it arrives as a turn starting `[LAN message from <agent> …]`. The frame format is not in Claude Code's official docs (seen in anthropics/claude-code#93720), so it can change between versions. Needs Claude Code 2.1.224+ (2.1.234+ on native Windows); the receiving session's `crossSessionInbound` must not be `hold` or `refuse`.
+- **Channels (fallback, needs a flag).** If there is no socket, the bridge sends `notifications/claude/channel`. Launch with `claude --dangerously-load-development-channels plugin:lan-agent-hub@wayne-marketplace` (research preview; claude.ai/Console login; Team/Enterprise needs `channelsEnabled`).
+
+`lan_inbox` always works as a pull fallback. The session must be open; messages to a closed session wait in the hub mailbox. Any agent that authenticates to your hub is treated as one of your own delegated agents: the receiving session does the work but asks you before destructive or sensitive actions. Protect the hub token/invites accordingly.
 
 The bridge no longer exits when no hub is found, and a client whose hub moves to a new IP re-finds it by mDNS name, so no fixed IP is needed.
 
